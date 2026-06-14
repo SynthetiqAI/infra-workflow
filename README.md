@@ -55,4 +55,21 @@ The OIDC subject is always the **caller** repo, so trusts key off the consumer r
 
 ## Versioning
 
-Reference a tag: `@v1`. Cut a `v1` tag/release on this repo so it resolves.
+Consumers pin a tag in `uses: …@v1`. This repo keeps two kinds of tags:
+
+- **`vX.Y.Z`** — immutable releases (e.g. `v1.0.0`). Pin here for zero surprises.
+- **`v1`** — a floating major alias that always points at the latest `v1.x.y`. The
+  docs/template pin this so consumers pick up fixes without editing their wrapper.
+
+### Releasing
+
+```bash
+# from a clean main with the change committed:
+git tag -a v1.0.1 -m "v1.0.1: <summary>"   # immutable release
+git push origin v1.0.1
+git tag -f v1 v1.0.1^{}                     # move the floating major alias
+git push -f origin v1
+```
+
+Bump the major (`v2`, and a new `v2.0.0`) only for breaking changes to the
+inputs/secrets contract; leave `v1` in place so existing callers keep working.
