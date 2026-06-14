@@ -1,0 +1,196 @@
+# Synthetiq BYOI infrastructure — reusable plan/apply workflow.
+#
+# Call it from your infra repo (see SynthetiqAI/infra-template):
+#
+#   jobs:
+#     infra:
+#       uses: SynthetiqAI/infra-workflow/.github/workflows/plan-apply.yml@v1
+#       with:
+#         plan-role-arn:   arn:aws:iam::<acct>:role/synthetiq-infra-plan
+#         apply-role-arn:  arn:aws:iam::<acct>:role/synthetiq-infra-apply
+#         organization-id: <your-org-id>
+#       secrets: inherit   # passes SYNTHETIQ_NPM_KEY through
+#
+# The caller defines the triggers (pull_request + push to main on _infra/**)
+# and grants permissions: id-token: write, contents: write, pull-requests: write.
+#
+# No long-lived credentials: each job assumes a GitHub-OIDC-federated AWS role,
+# and apply exchanges the run's GitHub OIDC token for a short-lived Synthetiq
+# token via the service account's trust. The OIDC subject is always the *caller*
+# repo, so AWS-role and Synthetiq trusts key off the consumer repo.
+name: synthetiq plan/apply
+
+on:
+  workflow_call:
+    inputs:
+      plan-role-arn:
+        description: AWS role assumed for the plan (change-set verbs only)
+        required: true
+        type: string
+      apply-role-arn:
+        description: AWS role assumed for the apply (full provisioning policy)
+        required: true
+        type: string
+      organization-id:
+        description: Synthetiq organization id the apply provisions into
+        required: true
+        type: string
+      aws-region:
+        description: Region for the STS/role assumption (the CLI uses the region in synthetiq.yaml for CloudFormation)
+        required: false
+        default: us-east-1
+        type: string
+      oidc-audience:
+        description: Audience the Synthetiq trust verifies the GitHub OIDC token against
+        required: false
+        default: https://api.synthetiq.com
+        type: string
+      synthetiq-login-url:
+        description: Synthetiq OAuth base URL (token exchange endpoint)
+        required: false
+        default: https://login.synthetiq.com
+        type: string
+      node-version:
+        required: false
+        default: "22"
+        type: string
+    secrets:
+      SYNTHETIQ_NPM_KEY:
+        description: Auth token for the Synthetiq private npm registry (to install @synthetiq/cli)
+        required: true
+
+concurrency:
+  group: synthetiq-infra-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- PLAN (pull request) ----
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}   # the PR branch, to commit the changeset back
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install the pinned CLI
+        run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+        env:
+          SYNTHETIQ_NPM_KEY: ${{ secrets.SYNTHETIQ_NPM_KEY }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.plan-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Generate changeset
+        run: npx synthetiq infra generate
+
+      - name: Commit the changeset to the PR branch
+        run: |
+          if [ -n "$(git status --porcelain _infra/changesets)" ]; then
+            git config user.name  "synthetiq-ci[bot]"
+            git config user.email "synthetiq-ci@users.noreply.github.com"
+            git add _infra/changesets
+            git commit -m "chore(infra): update changeset [skip ci]"
+            git push origin HEAD:${{ github.head_ref }}
+          fi
+
+      - name: Post the plan diff as a PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const dir = '_infra/changesets';
+            const files = fs.existsSync(dir)
+              ? fs.readdirSync(dir).filter(f => f.endsWith('.md'))
+                  .map(f => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs }))
+                  .sort((a, b) => b.m - a.m)
+              : [];
+            const marker = '<!-- synthetiq-infra-plan -->';
+            let body;
+            if (files.length === 0) {
+              body = `${marker}\nNo changeset was produced — the config already matches the account.`;
+            } else {
+              let md = fs.readFileSync(path.join(dir, files[0].f), 'utf8');
+              if (md.length > 60000) md = md.slice(0, 60000) + '\n\n…truncated…';
+              body = `${marker}\n### Synthetiq infrastructure plan\n\n\`${files[0].f}\`\n\n${md}`;
+            }
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const existing = (await github.rest.issues.listComments({ owner, repo, issue_number }))
+              .data.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  # ---- APPLY (merge to main) ----
+  apply:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install the pinned CLI
+        run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+        env:
+          SYNTHETIQ_NPM_KEY: ${{ secrets.SYNTHETIQ_NPM_KEY }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.apply-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Authenticate to Synthetiq (OIDC token exchange)
+        uses: actions/github-script@v7
+        env:
+          ORGANIZATION_ID: ${{ inputs.organization-id }}
+          OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+          LOGIN_URL: ${{ inputs.synthetiq-login-url }}
+        with:
+          script: |
+            const fs = require('fs');
+            const os = require('os');
+            const path = require('path');
+            const subjectToken = await core.getIDToken(process.env.OIDC_AUDIENCE);
+            const res = await fetch(`${process.env.LOGIN_URL}/oauth/token`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({
+                grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+                subject_token: subjectToken,
+                subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+                client_id: 'synthetiq-service-account',
+                organization_id: process.env.ORGANIZATION_ID,
+              }),
+            });
+            const text = await res.text();
+            if (!res.ok) { core.setFailed(`Synthetiq token exchange failed (${res.status}): ${text}`); return; }
+            const tok = JSON.parse(text);
+            const dir = path.join(os.homedir(), '.synthetiq');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'credentials.json'), JSON.stringify({
+              accessToken: tok.access_token,
+              expiresAt: String(Date.now() + (tok.expires_in ?? 900) * 1000),
+              userId: 'ci-service-account',
+              email: 'ci@synthetiq',
+              orgId: process.env.ORGANIZATION_ID,
+              orgName: 'ci',
+              isPersonalOrg: false,
+            }, null, 2), { mode: 0o600 });
+
+      - name: Provision
+        run: npx synthetiq infra provision --yes
