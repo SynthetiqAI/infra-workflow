@@ -89,7 +89,12 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
 
       - name: Generate changeset
-        run: npx synthetiq infra generate
+        # Detailed exit codes (like `terraform plan -detailed-exitcode`):
+        # 0 = no changes, 2 = changes pending, 1 = error. A pending plan (2) is
+        # success — it must not fail the job, or the commit/comment steps skip.
+        run: |
+          npx synthetiq infra generate || code=$?
+          if [ "${code:-0}" -eq 1 ]; then exit 1; fi
 
       - name: Commit the changeset to the PR branch
         run: |
