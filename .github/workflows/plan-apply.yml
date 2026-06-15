@@ -206,3 +206,7 @@ jobs:
 
       - name: Provision
         run: npx synthetiq infra provision --yes
+        env:
+          # Seeded into the account's Secrets Manager as synthetiq/npm-key so the
+          # deploy pipeline's CodeBuild can install @synthetiq/* during builds.
+          SYNTHETIQ_NPM_KEY: ${{ secrets.SYNTHETIQ_NPM_KEY }}
