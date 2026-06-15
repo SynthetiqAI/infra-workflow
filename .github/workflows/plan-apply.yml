@@ -96,13 +96,15 @@ jobs:
           npx synthetiq infra generate || code=$?
           if [ "${code:-0}" -eq 1 ]; then exit 1; fi
 
-      - name: Commit the changeset to the PR branch
+      - name: Commit the plan (changeset + rendered templates) to the PR branch
         run: |
-          if [ -n "$(git status --porcelain _infra/changesets)" ]; then
+          # _infra/cloudformation holds the rendered CloudFormation templates —
+          # their git diff is the content-review surface; the changeset is the impact summary.
+          if [ -n "$(git status --porcelain _infra/changesets _infra/cloudformation)" ]; then
             git config user.name  "synthetiq-ci[bot]"
             git config user.email "synthetiq-ci@users.noreply.github.com"
-            git add _infra/changesets
-            git commit -m "chore(infra): update changeset [skip ci]"
+            git add _infra/changesets _infra/cloudformation
+            git commit -m "chore(infra): update plan (changeset + templates) [skip ci]"
             git push origin HEAD:${{ github.head_ref }}
           fi
 
@@ -123,9 +125,14 @@ jobs:
             if (files.length === 0) {
               body = `${marker}\nNo changeset was produced — the config already matches the account.`;
             } else {
-              let md = fs.readFileSync(path.join(dir, files[0].f), 'utf8');
-              if (md.length > 60000) md = md.slice(0, 60000) + '\n\n…truncated…';
-              body = `${marker}\n### Synthetiq infrastructure plan\n\n\`${files[0].f}\`\n\n${md}`;
+              const md = fs.readFileSync(path.join(dir, files[0].f), 'utf8');
+              // Post the digest only; the full changeset + the CloudFormation
+              // template diff live in the PR's committed files.
+              const m = md.match(/<!-- summary:start -->\n?([\s\S]*?)\n?<!-- summary:end -->/);
+              let summary = m ? m[1] : md;
+              if (summary.length > 60000) summary = summary.slice(0, 60000) + '\n\n…truncated…';
+              body = `${marker}\n### Synthetiq infrastructure plan\n\n${summary}\n\n`
+                + `_Full changeset: \`${files[0].f}\` · review the **CloudFormation template diff** in this PR's Files changed._`;
             }
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
