@@ -14,6 +14,11 @@
 # The caller defines the triggers (pull_request + push to main on _infra/**)
 # and grants permissions: id-token: write, contents: write, pull-requests: write.
 #
+# By default the infra root (package.json, .npmrc, _infra/) sits at the repo
+# root. To nest it (e.g. partner/synthetiq/_infra), pass working-directory and
+# update the caller's trigger `paths:` to the same prefix — path filters are
+# static globs and can't read this input.
+#
 # No long-lived credentials: each job assumes a GitHub-OIDC-federated AWS role,
 # and apply exchanges the run's GitHub OIDC token for a short-lived Synthetiq
 # token via the service account's trust. The OIDC subject is always the *caller*
@@ -54,6 +59,11 @@ on:
         required: false
         default: "22"
         type: string
+      working-directory:
+        description: Path to the Synthetiq infra root (holds package.json, .npmrc, _infra/). Default = repo root.
+        required: false
+        default: "."
+        type: string
     secrets:
       SYNTHETIQ_NPM_KEY:
         description: Auth token for the Synthetiq private npm registry (to install @synthetiq/cli)
@@ -77,9 +87,11 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
       - name: Install the pinned CLI
         run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+        working-directory: ${{ inputs.working-directory }}
         env:
           SYNTHETIQ_NPM_KEY: ${{ secrets.SYNTHETIQ_NPM_KEY }}
 
@@ -92,11 +104,13 @@ jobs:
         # Detailed exit codes (like `terraform plan -detailed-exitcode`):
         # 0 = no changes, 2 = changes pending, 1 = error. A pending plan (2) is
         # success — it must not fail the job, or the commit/comment steps skip.
+        working-directory: ${{ inputs.working-directory }}
         run: |
           npx synthetiq infra generate || code=$?
           if [ "${code:-0}" -eq 1 ]; then exit 1; fi
 
       - name: Commit the plan (changeset + rendered templates) to the PR branch
+        working-directory: ${{ inputs.working-directory }}
         run: |
           # _infra/cloudformation holds the rendered CloudFormation templates —
           # their git diff is the content-review surface; the changeset is the impact summary.
@@ -110,11 +124,15 @@ jobs:
 
       - name: Post the plan diff as a PR comment
         uses: actions/github-script@v9
+        env:
+          # github-script runs at the repo root and ignores working-directory,
+          # so resolve the changesets dir relative to the infra root ourselves.
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const dir = '_infra/changesets';
+            const dir = path.join(process.env.WORKING_DIRECTORY || '.', '_infra/changesets');
             const files = fs.existsSync(dir)
               ? fs.readdirSync(dir).filter(f => f.endsWith('.md'))
                   .map(f => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs }))
@@ -155,9 +173,11 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
       - name: Install the pinned CLI
         run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+        working-directory: ${{ inputs.working-directory }}
         env:
           SYNTHETIQ_NPM_KEY: ${{ secrets.SYNTHETIQ_NPM_KEY }}
 
@@ -206,6 +226,7 @@ jobs:
 
       - name: Provision
         run: npx synthetiq infra provision --yes
+        working-directory: ${{ inputs.working-directory }}
         env:
           # Seeded into the account's Secrets Manager as synthetiq/npm-key so the
           # deploy pipeline's CodeBuild can install @synthetiq/* during builds.
