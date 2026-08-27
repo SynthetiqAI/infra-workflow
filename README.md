@@ -24,7 +24,8 @@ jobs:
       plan-role-arn:   arn:aws:iam::111122223333:role/synthetiq-infra-plan
       apply-role-arn:  arn:aws:iam::111122223333:role/synthetiq-infra-apply
       organization-id: <your-org-id>
-    secrets: inherit
+    secrets:
+      SYNTHETIQ_NPM_KEY: ${{ secrets.SYNTHETIQ_NPM_KEY }}
 ```
 
 ## Inputs
@@ -43,7 +44,7 @@ jobs:
 
 | Secret | Required | Description |
 |---|---|---|
-| `SYNTHETIQ_NPM_KEY` | yes | Auth for the Synthetiq private npm registry, to install `@synthetiq/cli`. Pass with `secrets: inherit`. |
+| `SYNTHETIQ_NPM_KEY` | yes | Auth for the Synthetiq private npm registry, to install `@synthetiq/cli`. |
 
 ## Caller prerequisites
 
