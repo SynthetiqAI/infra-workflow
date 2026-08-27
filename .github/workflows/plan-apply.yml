@@ -9,7 +9,8 @@
 #         plan-role-arn:   arn:aws:iam::<acct>:role/synthetiq-infra-plan
 #         apply-role-arn:  arn:aws:iam::<acct>:role/synthetiq-infra-apply
 #         organization-id: <your-org-id>
-#       secrets: inherit   # passes SYNTHETIQ_NPM_KEY through
+#       secrets:
+#         SYNTHETIQ_NPM_KEY: ${{ secrets.SYNTHETIQ_NPM_KEY }}
 #
 # The caller defines the triggers (pull_request + push to main on _infra/**)
 # and grants permissions: id-token: write, contents: write, pull-requests: write.
